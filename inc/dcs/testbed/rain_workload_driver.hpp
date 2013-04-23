@@ -124,6 +124,7 @@ inline
 
 	args.push_back("-cp");
 	args.push_back(rain_home + "/rain.jar:" + rain_home + "/workloads/" + workload + ".jar");
+	args.push_back("-Djava.util.logging.config.file=" + rain_home + "/config/logging.properties");
 	args.push_back("radlab.rain.Benchmark");
 	args.push_back(rain_home + "/config/rain.config." + workload + ".json");
 
@@ -803,7 +804,7 @@ DCS_DEBUG_TRACE("STEADY-STATE THREAD -- IFS STREAM -- LINE: " << line << " - POS
 
 			::std::time_t obs_ts(0); // timestamp (in secs from Epoch)
 			::std::string obs_op; // Operation label
-			long obs_rtms(0); // response time (in ms)
+			long obs_rtns(0); // response time (in ns)
 			::std::size_t field(0);
 			for (::std::size_t pos = 0; pos < n; ++pos)
 			{
@@ -834,7 +835,8 @@ DCS_DEBUG_TRACE("STEADY-STATE THREAD -- Timestamp: " << obs_ts);
 						case operation_field:
 						{
 							::std::size_t pos2(pos);
-							for (; pos2 < n && ::std::isalpha(line[pos2]); ++pos2)
+							//for (; pos2 < n && ::std::isalpha(line[pos2]); ++pos2)
+							for (; pos2 < n && !::std::isspace(line[pos2]); ++pos2)
 							{
 								;
 							}
@@ -851,8 +853,8 @@ DCS_DEBUG_TRACE("STEADY-STATE THREAD -- Operation: " << obs_op);
 								;
 							}
 							::std::istringstream iss(line.substr(pos, pos2-pos));
-							iss >> obs_rtms;
-DCS_DEBUG_TRACE("STEADY-STATE THREAD -- Response Time: " << obs_rtms);
+							iss >> obs_rtns;
+DCS_DEBUG_TRACE("STEADY-STATE THREAD -- Response Time (nsecs): " << obs_rtns);
 							pos = pos2;
 							break;
 						}
@@ -867,7 +869,21 @@ DCS_DEBUG_TRACE("STEADY-STATE THREAD -- Response Time: " << obs_rtms);
 				}
 			}
 
-			p_driver->add_observation(obs_ts, obs_op, obs_rtms);
+			// Select only a subset of operations
+#ifdef DCSXX_TESTBED_EXP_FILTER_OPERATIONS
+//			if (obs_op == "About-Me"
+//				|| obs_op == "Bid"
+//				|| obs_op == "Browse-Categories"
+//				|| obs_op == "Browse-Regions"
+//				|| obs_op == "Buy-Now-Item"
+//				|| obs_op == "Sell")
+			if (obs_op == "Browse-Regions")
+			{
+				p_driver->add_observation(obs_ts, obs_op, obs_rtns*1.0e-6);
+			}
+#else // DCSXX_TESTBED_EXP_FILTER_OPERATIONS
+			p_driver->add_observation(obs_ts, obs_op, obs_rtns*1.0e-6);
+#endif // DCSXX_TESTBED_EXP_FILTER_OPERATIONS
 		}
 
 		// Found EOF. Two possible reasons:

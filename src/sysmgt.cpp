@@ -36,6 +36,8 @@
 #include <cstring>
 #include <dcs/cli.hpp>
 #include <dcs/logging.hpp>
+#include <dcs/testbed/data_estimators.hpp>
+#include <dcs/testbed/data_smoothers.hpp>
 #include <dcs/testbed/system_management.hpp>
 #include <dcs/testbed/workload_category.hpp>
 #include <dcs/testbed/workload_drivers.hpp>
@@ -55,15 +57,39 @@ namespace detail { namespace /*<unnamed>*/ {
 //	mean_aggregation
 //};
 
+enum data_smoother_category
+{
+	dummy_smoother,
+	brown_single_exponential_smoother,
+	brown_double_exponential_smoother,
+	holt_winters_double_exponential_smoother
+};
+
+enum data_estimator_category
+{
+	mean_estimator,
+	p2_quantile_estimator
+};
+
+
 const dcs::testbed::workload_category default_workload(dcs::testbed::olio_workload);
 const dcs::testbed::workload_generator_category default_workload_driver(dcs::testbed::rain_workload_generator);
 const ::std::string default_workload_driver_rain_path("/usr/local/opt/rain-workload-toolkit");
 const ::std::string default_out_dat_file("./sysmgt-out.dat");
 const double default_sampling_time(10);
-const double default_ewma_smooth_factor(0.9);
+const data_estimator_category default_data_estimator(mean_estimator);
+const data_smoother_category default_data_smoother(brown_single_exponential_smoother);
+const double default_brown_single_exponential_alpha(0.7);
+const double default_brown_double_exponential_alpha(0.7);
+const double default_holt_winters_double_exponential_alpha(0.8);
+const double default_holt_winters_double_exponential_beta(0.3);
+const double default_holt_winters_double_exponential_delta(0.7);
+const double default_p2_quantile_prob(0.99);
+
 
 void usage(char const* progname)
 {
+	//DEPRECATED
 	::std::cerr << "Usage: " << progname << " [options]" << ::std::endl
 				<< " --help" << ::std::endl
 				<< "   Show this message." << ::std::endl
@@ -88,6 +114,104 @@ void usage(char const* progname)
 				<< ::std::endl;
 }
 
+template <typename CharT, typename CharTraitsT>
+inline
+::std::basic_istream<CharT,CharTraitsT>& operator>>(::std::basic_istream<CharT,CharTraitsT>& is, data_smoother_category& cat)
+{
+    ::std::string s;
+    is >> s;
+    ::dcs::string::to_lower(s);
+
+    if (!s.compare("brown_ses"))
+    {
+        cat = brown_single_exponential_smoother;
+    }
+    else if (!s.compare("dummy"))
+    {
+        cat = dummy_smoother;
+    }
+    else if (!s.compare("brown_des"))
+    {
+        cat = brown_double_exponential_smoother;
+    }
+    else if (!s.compare("holt_winters_des"))
+    {
+        cat = holt_winters_double_exponential_smoother;
+    }
+    else
+    {
+        DCS_EXCEPTION_THROW(::std::runtime_error,
+                            "Unknown data smoother category");
+    }
+
+	return is;
+}
+
+template <typename CharT, typename CharTraitsT>
+inline
+::std::basic_istream<CharT,CharTraitsT>& operator>>(::std::basic_istream<CharT,CharTraitsT>& is, data_estimator_category& cat)
+{
+    ::std::string s;
+    is >> s;
+    ::dcs::string::to_lower(s);
+
+    if (!s.compare("mean"))
+    {
+        cat = mean_estimator;
+    }
+    else if (!s.compare("p2_quantile"))
+    {
+        cat = p2_quantile_estimator;
+    }
+    else
+    {
+        DCS_EXCEPTION_THROW(::std::runtime_error,
+                            "Unknown data estimator category");
+    }
+
+	return is;
+}
+
+template <typename CharT, typename CharTraitsT>
+inline
+::std::basic_ostream<CharT,CharTraitsT>& operator>>(::std::basic_ostream<CharT,CharTraitsT>& os, data_smoother_category cat)
+{
+	switch (cat)
+	{
+		case detail::brown_single_exponential_smoother:
+			os << "brown_ses";
+			break;
+		case detail::brown_double_exponential_smoother:
+			os << "brown_des";
+			break;
+		case detail::dummy_smoother:
+			os << "dummy";
+			break;
+		case detail::holt_winters_double_exponential_smoother:
+			os << "holt_winters_des";
+			break;
+	}
+
+	return os;
+}
+
+template <typename CharT, typename CharTraitsT>
+inline
+::std::basic_ostream<CharT,CharTraitsT>& operator>>(::std::basic_ostream<CharT,CharTraitsT>& os, data_estimator_category cat)
+{
+	switch (cat)
+	{
+		case detail::mean_estimator:
+			os << "mean";
+			break;
+		case detail::p2_quantile_estimator:
+			os << "p2_quantile";
+			break;
+	}
+
+	return os;
+}
+
 }} // Namespace detail::<unnamed>
 
 
@@ -100,8 +224,15 @@ int main(int argc, char *argv[])
 
 	bool help(false);
 	std::string out_dat_file;
-	real_type ewma_smooth_factor;
-	real_type ts;
+	detail::data_estimator_category data_estimator;
+	detail::data_smoother_category data_smoother;
+	real_type brown_single_exponential_alpha(0);
+	real_type brown_double_exponential_alpha(0);
+	real_type holt_winters_double_exponential_alpha(0);
+	real_type holt_winters_double_exponential_beta(0);
+	real_type holt_winters_double_exponential_delta(0);
+	real_type p2_quantile_prob(0);
+	real_type ts(0);
 	bool verbose(false);
 	testbed::workload_category wkl;
 	testbed::workload_generator_category wkl_driver;
@@ -112,7 +243,14 @@ int main(int argc, char *argv[])
 	{
 		help = dcs::cli::simple::get_option(argv, argv+argc, "--help");
 		out_dat_file = dcs::cli::simple::get_option<std::string>(argv, argv+argc, "--out-dat-file", detail::default_out_dat_file);
-		ewma_smooth_factor = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--aggr-ewma-factor", detail::default_ewma_smooth_factor);
+		data_estimator = dcs::cli::simple::get_option<detail::data_estimator_category>(argv, argv+argc, "--data-estimator", detail::default_data_estimator);
+		p2_quantile_prob = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--p2-quantile-prob", detail::default_p2_quantile_prob);
+		data_smoother = dcs::cli::simple::get_option<detail::data_smoother_category>(argv, argv+argc, "--data-smoother", detail::default_data_smoother);
+		brown_single_exponential_alpha = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--brown_ses-alpha", detail::default_brown_single_exponential_alpha);
+		brown_double_exponential_alpha = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--brown_des-alpha", detail::default_brown_double_exponential_alpha);
+		holt_winters_double_exponential_alpha = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--holt_winters_des-alpha", detail::default_holt_winters_double_exponential_alpha);
+		holt_winters_double_exponential_beta = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--holt_winters_des-beta", detail::default_holt_winters_double_exponential_beta);
+		holt_winters_double_exponential_delta = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--holt_winters_des-delta", detail::default_holt_winters_double_exponential_delta);
 		ts = dcs::cli::simple::get_option<real_type>(argv, argv+argc, "--ts", detail::default_sampling_time);
 		verbose = dcs::cli::simple::get_option(argv, argv+argc, "--verbose");
 		wkl = dcs::cli::simple::get_option<testbed::workload_category>(argv, argv+argc, "--wkl", detail::default_workload);
@@ -137,6 +275,9 @@ int main(int argc, char *argv[])
 	}
 
 	int ret(0);
+data_smoother = detail::dummy_smoother;
+data_estimator = detail::p2_quantile_estimator;
+verbose=true;
 
 	if (verbose)
 	{
@@ -146,7 +287,35 @@ int main(int argc, char *argv[])
 		dcs::log_info(DCS_LOGGING_AT, oss.str());
 		oss.str("");
 
-		oss << "EWMA smoothing factor: " << ewma_smooth_factor;
+		oss << "Data estimator: " << data_estimator;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "P^2 quantile estimator probability: " << p2_quantile_prob;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "Data smoother: " << data_smoother;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "Brown's single exponential smoother alpha: " << brown_single_exponential_alpha;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "Brown's double exponential smoother alpha: " << brown_double_exponential_alpha;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "Holt-Winters' double exponential smoother alpha: " << holt_winters_double_exponential_alpha;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "Holt-Winters' double exponential smoother beta: " << holt_winters_double_exponential_beta;
+		dcs::log_info(DCS_LOGGING_AT, oss.str());
+		oss.str("");
+
+		oss << "Holt-Winters' double exponential smoother delta: " << holt_winters_double_exponential_delta;
 		dcs::log_info(DCS_LOGGING_AT, oss.str());
 		oss.str("");
 
@@ -181,18 +350,59 @@ int main(int argc, char *argv[])
 //		vms[1] = p_oliodb_vm;
 
 		boost::shared_ptr< testbed::base_workload_driver > p_driver;
-
 		switch (wkl_driver)
 		{
 			case testbed::rain_workload_generator:
-				p_driver = ::boost::make_shared<testbed::rain_workload_driver>(wkl, wkl_driver_rain_path);
+				p_driver = boost::make_shared<testbed::rain_workload_driver>(wkl, wkl_driver_rain_path);
 				break;
+			default:
+				DCS_EXCEPTION_THROW(std::runtime_error, "Unknown workload driver");
+		}
+
+		boost::shared_ptr< testbed::base_estimator<real_type> > p_estimator;
+		switch (data_estimator)
+		{
+			case detail::mean_estimator:
+				p_estimator = boost::make_shared< testbed::mean_estimator<real_type> >();
+				break;
+			case detail::p2_quantile_estimator:
+				p_estimator = boost::make_shared< testbed::p2_quantile_estimator<real_type> >(p2_quantile_prob);
+				break;
+			default:
+				DCS_EXCEPTION_THROW(std::runtime_error, "Unknown data estimator");
+		}
+
+		boost::shared_ptr< testbed::base_smoother<real_type> > p_smoother;
+		switch (data_smoother)
+		{
+			case detail::brown_single_exponential_smoother:
+				p_smoother = boost::make_shared< testbed::brown_single_exponential_smoother<real_type> >(brown_single_exponential_alpha);
+				break;
+			case detail::brown_double_exponential_smoother:
+				p_smoother = boost::make_shared< testbed::brown_double_exponential_smoother<real_type> >(brown_double_exponential_alpha);
+				break;
+			case detail::dummy_smoother:
+				p_smoother = boost::make_shared< testbed::dummy_smoother<real_type> >();
+				break;
+			case detail::holt_winters_double_exponential_smoother:
+				if (holt_winters_double_exponential_delta > 0)
+				{
+					p_smoother = boost::make_shared< testbed::holt_winters_double_exponential_smoother<real_type> >(holt_winters_double_exponential_delta);
+				}
+				else
+				{
+					p_smoother = boost::make_shared< testbed::holt_winters_double_exponential_smoother<real_type> >(holt_winters_double_exponential_alpha, holt_winters_double_exponential_beta);
+				}
+				break;
+			default:
+				DCS_EXCEPTION_THROW(std::runtime_error, "Unknown data smoother");
 		}
 
 		testbed::system_management<real_type> sysmgt(p_driver);
 		sysmgt.output_data_file(out_dat_file);
 		sysmgt.sampling_time(ts);
-		sysmgt.ewma_smoothing_factor(ewma_smooth_factor);
+		sysmgt.data_estimator(p_estimator);
+		sysmgt.data_smoother(p_smoother);
 
 		sysmgt.run();
 	}

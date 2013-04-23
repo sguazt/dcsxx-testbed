@@ -35,7 +35,11 @@
 
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics/stats.hpp>
-#include <boost/accumulators/statistics/mean.hpp>
+#if defined(DCSXX_TESTBED_EXP_USE_MEAN_ESTIMATOR)
+# include <boost/accumulators/statistics/mean.hpp>
+#elif defined(DCSXX_TESTBED_EXP_USE_QUANTILE_ESTIMATOR)
+# include <boost/accumulators/statistics/p_square_quantile.hpp>
+#endif // DCSXX_TESTBED_EXP_USE_*_ESTIMATOR
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <ctime>
@@ -44,6 +48,8 @@
 #include <dcs/exception.hpp>
 #include <dcs/testbed/base_virtual_machine.hpp>
 #include <dcs/testbed/base_workload_driver.hpp>
+#include <dcs/testbed/data_estimators.hpp>
+#include <dcs/testbed/data_smoothers.hpp>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -69,19 +75,20 @@ class system_management
 	public: typedef base_workload_driver workload_driver_type;
 	public: typedef ::boost::shared_ptr<workload_driver_type> workload_driver_pointer;
 //	private: typedef ::std::vector<vm_pointer> vm_container;
+	public: typedef base_estimator<real_type> estimator_type;
+	public: typedef ::boost::shared_ptr<estimator_type> estimator_pointer;
+	public: typedef base_smoother<real_type> smoother_type;
+	public: typedef ::boost::shared_ptr<smoother_type> smoother_pointer;
 
 
 	private: static const unsigned int default_sampling_time = 10;
 	private: static const ::std::string default_output_data_file_path;
-	private: static const real_type default_ewma_smoothing_factor;
 
 
 	/// Default constructor.
 	public: system_management()
 	: ts_(default_sampling_time),
-	  out_dat_file_(default_output_data_file_path),
-	  ewma_factor_(default_ewma_smoothing_factor),
-	  ewma_obs_(0)
+	  out_dat_file_(default_output_data_file_path)
 	{
 	}
 
@@ -91,9 +98,7 @@ class system_management
 	: /*vms_(vm_first, vm_last),*/
 	  p_wkl_driver_(p_wkl_driver),
 	  ts_(default_sampling_time),
-	  out_dat_file_(default_output_data_file_path),
-	  ewma_factor_(default_ewma_smoothing_factor),
-	  ewma_obs_(0)
+	  out_dat_file_(default_output_data_file_path)
 	{
 	}
 
@@ -123,15 +128,26 @@ class system_management
 		ts_ = static_cast<unsigned int>(t);
 	}
 
-	/// Set the EWMA smoothing factor.
-	public: void ewma_smoothing_factor(real_type v)
+	/// Set the data estimator
+	public: void data_estimator(estimator_pointer const& p_estimator)
 	{
 		// pre: 0 <= v <= 1
-		DCS_ASSERT(v >= 0.0 && v <= 1.0,
+		DCS_ASSERT(p_estimator,
 				   DCS_EXCEPTION_THROW(::std::invalid_argument,
-									   "EWMA smoothing factor must be in the [0,1] range"));
+									   "Invalid pointer to data estimator"));
 
-		ewma_factor_ = v;
+		p_estimator_ = p_estimator;
+	}
+
+	/// Set the data smoother
+	public: void data_smoother(smoother_pointer const& p_smoother)
+	{
+		// pre: 0 <= v <= 1
+		DCS_ASSERT(p_smoother,
+				   DCS_EXCEPTION_THROW(::std::invalid_argument,
+									   "Invalid pointer to data smoother"));
+
+		p_smoother_ = p_smoother;
 	}
 
 //	/**
@@ -226,7 +242,6 @@ class system_management
 		::std::time_t t0(-1);
 		::std::time_t t1(-1);
 		::std::time(&t1);
-		bool ewma_init(true);
 		while (!p_wkl_driver_->done())
 		{
 			DCS_DEBUG_TRACE( "   Driver is alive" );
@@ -277,54 +292,55 @@ class system_management
 					++ix;
 				}
 */
+#ifdef DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+				::std::ofstream tmp_ofs("./smoothed_data_dump.log", ::std::ios_base::out | ::std::ios_base::app);
+				if (!tmp_ofs.good())
+				{
+					::std::ostringstream oss;
+					oss << "Cannot open output data file 'smoothed_data_dump.log'";
+
+					DCS_EXCEPTION_THROW(::std::runtime_error, oss.str());
+				}
+#endif // DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
 
 				// Get collected observations
 				typedef typename workload_driver_type::observation_type observation_type;
 				typedef ::std::vector<observation_type> obs_container;
 				typedef typename obs_container::const_iterator obs_iterator;
 				obs_container obs = p_wkl_driver_->observations();
-				//FIXME: parameterize the type of statistics the user want
-				::boost::accumulators::accumulator_set< real_type, ::boost::accumulators::stats< ::boost::accumulators::tag::mean > > acc;
 				obs_iterator obs_end_it(obs.end());
+#ifdef DCSXX_TESTBED_EXP_RESET_ESTIMATION_EVERY_INTERVAL
+				p_estimator_->reset();
+#endif // DCSXX_TESTBED_EXP_RESET_ESTIMATION_EVERY_INTERVAL
 				for (obs_iterator obs_it = obs.begin();
 					 obs_it != obs_end_it;
 					 ++obs_it)
 				{
 					real_type val(obs_it->value());
-#ifdef EWMA_ON_SINGLE_OBSERVATION
-					if (ewma_init)
-					{
-						ewma_init = false;
-						ewma_obs_ = val;
-					}
-					else
-					{
-						ewma_obs_ = ewma_factor_*val+(1-ewma_factor_)*ewma_obs_;
-					}
-#else
-					acc(val);
-#endif // EWMA_ON_SINGLE_OBSERVATION
+#ifdef DCSXX_TESTBED_EXP_SMOOTHING_ON_SINGLE_OBSERVATION
+					p_smoother_->smooth(val);
+# ifdef DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+					tmp_ofs << "UPDATE - VAL: " << val << " - SMOOTHED: " << p_smoother_->forecast(0) << ::std::endl;
+# endif // DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+#else // DCSXX_TESTBED_EXP_SMOOTHING_ON_SINGLE_OBSERVATION
+					p_estimator_->collect(val);
+#endif // DCSXX_TESTBED_EXP_SMOOTHING_ON_SINGLE_OBSERVATION
 				}
 
+#ifndef DCSXX_TESTBED_EXP_SMOOTHING_ON_SINGLE_OBSERVATION
 				// Compute a summary statistics of collected observation
-				//FIXME: parameterize the type of statistics the user want
-				real_type summary_obs = ::boost::accumulators::mean(acc);
+				real_type summary_obs = p_estimator_->estimate();
 
 				DCS_DEBUG_TRACE( "   Current (summary) observation: " << summary_obs );
 
-#ifndef EWMA_ON_SINGLE_OBSERVATION
-				if (ewma_init)
-				{
-					ewma_init = false;
-					ewma_obs_ = summary_obs;
-				}
-				else
-				{
-					ewma_obs_ = ewma_factor_*summary_obs+(1-ewma_factor_)*ewma_obs_;
-				}
-#endif // EWMA_ON_SINGLE_OBSERVATION
+				p_smoother_->smooth(summary_obs);
+				::std::cerr << "UPDATE - VAL: " << summary_obs << " - SMOOTHED: " << p_smoother_->forecast(0) << ::std::endl;
+# ifdef DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+				tmp_ofs << "UPDATE - VAL: " << summary_obs << " - SMOOTHED: " << p_smoother_->forecast(0) << ::std::endl;
+# endif // DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+#endif // DCSXX_TESTBED_EXP_SMOOTHING_ON_SINGLE_OBSERVATION
 
-				DCS_DEBUG_TRACE( "   Current EWMA (summary) observation: " << ewma_obs_ );
+				DCS_DEBUG_TRACE( "   Current SMOOTHED (summary) observation: " << p_smoother_->forecast(0) );
 
 				// Open output data file
 				::std::ofstream ofs(out_dat_file_.c_str());
@@ -337,10 +353,18 @@ class system_management
 				}
 
 				// Write current observation (and overwrite old ones)
-				ofs << ewma_obs_ << ::std::endl;
+				ofs << p_smoother_->forecast(0) << ::std::endl;
 
+#ifdef DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+				// Write current observation (and overwrite old ones)
+				tmp_ofs << "FINAL SMOOTHED: " << p_smoother_->forecast(0) << ::std::endl;
+#endif // DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
 				// Close output data file
 				ofs.close();
+#ifdef DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
+				// Close output data file
+				tmp_ofs.close();
+#endif // DCSXX_TESTBED_EXP_DUMP_SMOOTHED_DATA
 			}
 
 			// Wait until the next sampling time
@@ -377,15 +401,12 @@ class system_management
 //	private: signal_generator_pointer p_sig_gen_; ///< Ptr to signal generator used to excite VMs
 	private: unsigned int ts_; ///< The sampling time
 	private: ::std::string out_dat_file_; ///< The path to the output data file
-	private: real_type ewma_factor_; ///< The EWMA smoothing factor
-	private: real_type ewma_obs_; ///< The current EWMA observation
+	private: estimator_pointer p_estimator_;
+	private: smoother_pointer p_smoother_;
 }; // system_management
 
 template <typename RealT>
 const ::std::string system_management<RealT>::default_output_data_file_path("./sysmgnt_out.dat");
-
-template <typename RealT>
-const RealT system_management<RealT>::default_ewma_smoothing_factor(0.7);
 
 }} // Namespace dcs::testbed
 
