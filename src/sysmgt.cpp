@@ -174,20 +174,20 @@ inline
 
 template <typename CharT, typename CharTraitsT>
 inline
-::std::basic_ostream<CharT,CharTraitsT>& operator>>(::std::basic_ostream<CharT,CharTraitsT>& os, data_smoother_category cat)
+::std::basic_ostream<CharT,CharTraitsT>& operator<<(std::basic_ostream<CharT,CharTraitsT>& os, data_smoother_category cat)
 {
 	switch (cat)
 	{
-		case detail::brown_single_exponential_smoother:
+		case brown_single_exponential_smoother:
 			os << "brown_ses";
 			break;
-		case detail::brown_double_exponential_smoother:
+		case brown_double_exponential_smoother:
 			os << "brown_des";
 			break;
-		case detail::dummy_smoother:
+		case dummy_smoother:
 			os << "dummy";
 			break;
-		case detail::holt_winters_double_exponential_smoother:
+		case holt_winters_double_exponential_smoother:
 			os << "holt_winters_des";
 			break;
 	}
@@ -197,14 +197,14 @@ inline
 
 template <typename CharT, typename CharTraitsT>
 inline
-::std::basic_ostream<CharT,CharTraitsT>& operator>>(::std::basic_ostream<CharT,CharTraitsT>& os, data_estimator_category cat)
+::std::basic_ostream<CharT,CharTraitsT>& operator<<(std::basic_ostream<CharT,CharTraitsT>& os, data_estimator_category cat)
 {
 	switch (cat)
 	{
-		case detail::mean_estimator:
+		case mean_estimator:
 			os << "mean";
 			break;
-		case detail::p2_quantile_estimator:
+		case p2_quantile_estimator:
 			os << "p2_quantile";
 			break;
 	}
@@ -275,9 +275,6 @@ int main(int argc, char *argv[])
 	}
 
 	int ret(0);
-data_smoother = detail::dummy_smoother;
-data_estimator = detail::p2_quantile_estimator;
-verbose=true;
 
 	if (verbose)
 	{
